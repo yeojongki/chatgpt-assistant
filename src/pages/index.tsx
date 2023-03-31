@@ -1,123 +1,241 @@
-import Head from 'next/head'
-import Image from 'next/image'
-import { Inter } from 'next/font/google'
-import styles from '@/styles/Home.module.css'
+import { Space, message, Table, Upload, UploadProps } from 'antd'
+import { aoaToSheetXlsx, readerData } from '@/utils/excel'
+import { InboxOutlined } from '@ant-design/icons'
+// import VirtualTable from '@/components/vertual-table'
+import { useState } from 'react'
+import { ColumnsType } from 'antd/es/table'
+import {
+  addItemToTranslateHistory,
+  addToTranslateHistory,
+  getTranslateHistory,
+} from '@/utils/storage'
+import AsyncButton from '@/components/async-button'
+import PromiseQueue from '@/utils/promise-queue'
+const { Dragger } = Upload
 
-const inter = Inter({ subsets: ['latin'] })
+interface Data {
+  EN?: string
+  CN: string
+}
 
 export default function Home() {
+  const [allIndexMap, setAllIndexMap] = useState<Record<string, number>>({})
+  const [storageHistory, setStorageHistory] = useState<Record<string, string>>(
+    {},
+  )
+  const [excelInfo, setExcelInfo] = useState({ name: '', ext: '' })
+  const [dataSource, setDataSource] = useState<Data[]>([])
+
+  // const rowSelection = {
+  //   onChange: (selectedRowKeys: React.Key[], selectedRows: Data[]) => {
+  //     console.log(
+  //       `selectedRowKeys: ${selectedRowKeys}`,
+  //       'selectedRows: ',
+  //       selectedRows,
+  //     )
+  //   },
+  //   getCheckboxProps: (record: Data) => ({
+  //     disabled: !!storageHistory[record.CN], // Column configuration not to be checked
+  //   }),
+  // }
+
+  const columns: ColumnsType<any> = [
+    { title: 'CN', dataIndex: 'CN' },
+    { title: 'EN', dataIndex: 'EN' },
+    {
+      title: 'Action',
+      render(value, _, index) {
+        const disabled = !!value.EN || !!storageHistory[value.CN]
+        return (
+          <AsyncButton
+            disabled={disabled}
+            request={() => translateTextByIndex(value.CN, index)}
+          >
+            {disabled ? 'Translated' : 'Translate'}
+          </AsyncButton>
+        )
+      },
+    },
+  ]
+
+  const props: UploadProps = {
+    name: 'file',
+    multiple: false,
+    maxCount: 1,
+    accept: '.xlsx, .xls',
+    onChange(info) {
+      if (info.file.status !== 'uploading') {
+        const nameArray = info.file.name.split('.')
+        // set name
+        setExcelInfo({
+          name: nameArray.slice(0, nameArray.length - 1).join('.'),
+          ext: nameArray[nameArray.length - 1],
+        })
+
+        const translateHistory = getTranslateHistory() || {}
+        setStorageHistory(translateHistory)
+
+        readerData<Data>(info.file.originFileObj as File).then((res) => {
+          // TODO display all sheet
+          const firstSheet = res[0]
+          if (!firstSheet?.results.length) {
+            message.error('sheet1 data is empty!')
+            return
+          }
+
+          firstSheet.results = firstSheet.results.map(({ CN, EN }, index) => {
+            allIndexMap[CN] = index
+            return {
+              CN,
+              EN: EN || translateHistory[CN],
+            }
+          })
+          setAllIndexMap({ ...allIndexMap })
+          setDataSource(firstSheet.results)
+        })
+      }
+      if (info.file.status === 'done') {
+        message.success(`${info.file.name} file uploaded successfully`)
+      } else if (info.file.status === 'error') {
+        message.error(`${info.file.name} file upload failed.`)
+      }
+    },
+  }
+
+  const requestTranslate = async (text: string) => {
+    const response = await fetch('/api/translate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text }),
+    })
+
+    const data: { result: string; error: any } = await response.json()
+    if (response.status !== 200) {
+      throw (
+        data.error || new Error(`Request failed with status ${response.status}`)
+      )
+    }
+    return data
+  }
+
+  const translateTextByIndex = async (text: string, index: number) => {
+    try {
+      const data = await requestTranslate(text)
+      const EN = data.result.replace(/^\n+/, '')
+      dataSource[index].EN = EN
+
+      // update table data source & add to storage
+      setDataSource([...dataSource])
+      addToTranslateHistory(text, EN)
+    } catch (error: any) {
+      console.error(error)
+      message.error(error.message)
+    }
+  }
+
+  const translateTextByAll = async (textWithLineBreak: string) => {
+    const CNList = textWithLineBreak.split('\n')
+    const data = await requestTranslate(textWithLineBreak)
+    console.log(data.result)
+    const ENList = data.result.replace(/^\n+/, '').split('\n').filter(Boolean)
+    ENList.forEach((item, loopIndex) => {
+      const allIndex = allIndexMap[CNList[loopIndex]]
+      const EN = item.replace(/^\n+/, '')
+      dataSource[allIndex].EN = EN
+      // add to storage
+      addItemToTranslateHistory({ [CNList[loopIndex]]: item })
+    })
+    // update table data source
+    setDataSource([...dataSource])
+  }
+
+  const buildTranslateList = (copyList: Data[], divCount: number) => {
+    const result: Data[][] = []
+    let temp: Data[] = []
+    while (copyList.length) {
+      if (temp.length === divCount) {
+        result.push(temp)
+        temp = []
+      }
+      const current = copyList.shift()!
+      !current.EN && temp.push(current)
+    }
+    if (temp.length) {
+      result.push(temp)
+    }
+    return result
+  }
+
+  // translate all data
+  const translateAll = async (concurrency = 5, divCount = 5) => {
+    const pQueue = new PromiseQueue(concurrency)
+    const copyList = dataSource.slice()
+    const divideList = buildTranslateList(copyList, divCount)
+
+    divideList.forEach((arr) => {
+      let text = ''
+      arr.forEach((item, index) => {
+        const isLast = index === arr.length - 1
+        text += item.CN + (isLast ? '' : '\n')
+        isLast && pQueue.add(() => translateTextByAll(text))
+      })
+    })
+  }
+
+  // export all data
+  const exportAll = async () => {
+    const data = dataSource.map((item) => {
+      return Object.keys(item).map((key) => item[key as keyof typeof item])
+    })
+    aoaToSheetXlsx({
+      data,
+      header: ['CN', 'EN'],
+      filename: `${excelInfo.name}-${+new Date()}.${excelInfo.ext}`,
+    })
+  }
+
   return (
-    <>
-      <Head>
-        <title>Create Next App</title>
-        <meta name="description" content="Generated by create next app" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="/favicon.ico" />
-      </Head>
-      <main className={styles.main}>
-        <div className={styles.description}>
-          <p>
-            Get started by editing&nbsp;
-            <code className={styles.code}>src/pages/index.tsx</code>
-          </p>
-          <div>
-            <a
-              href="https://vercel.com?utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              By{' '}
-              <Image
-                src="/vercel.svg"
-                alt="Vercel Logo"
-                className={styles.vercelLogo}
-                width={100}
-                height={24}
-                priority
-              />
-            </a>
-          </div>
-        </div>
+    <main style={{ padding: 20 }}>
+      <Dragger {...props}>
+        <p className='ant-upload-drag-icon'>
+          <InboxOutlined />
+        </p>
+        <p className='ant-upload-text'>
+          Click or drag file to this area to upload
+        </p>
+      </Dragger>
 
-        <div className={styles.center}>
-          <Image
-            className={styles.logo}
-            src="/next.svg"
-            alt="Next.js Logo"
-            width={180}
-            height={37}
-            priority
-          />
-          <div className={styles.thirteen}>
-            <Image
-              src="/thirteen.svg"
-              alt="13"
-              width={40}
-              height={31}
-              priority
-            />
-          </div>
-        </div>
+      <Space align='center'>
+        <AsyncButton
+          style={{ marginTop: 30 }}
+          type='primary'
+          request={translateAll}
+          disabled={!dataSource.length}
+        >
+          Translate ALL
+        </AsyncButton>
 
-        <div className={styles.grid}>
-          <a
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-            className={styles.card}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <h2 className={inter.className}>
-              Docs <span>-&gt;</span>
-            </h2>
-            <p className={inter.className}>
-              Find in-depth information about Next.js features and&nbsp;API.
-            </p>
-          </a>
+        <AsyncButton
+          style={{ marginTop: 30 }}
+          type='primary'
+          request={exportAll}
+          disabled={!dataSource.length}
+        >
+          Export ALL
+        </AsyncButton>
+      </Space>
 
-          <a
-            href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-            className={styles.card}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <h2 className={inter.className}>
-              Learn <span>-&gt;</span>
-            </h2>
-            <p className={inter.className}>
-              Learn about Next.js in an interactive course with&nbsp;quizzes!
-            </p>
-          </a>
-
-          <a
-            href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-            className={styles.card}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <h2 className={inter.className}>
-              Templates <span>-&gt;</span>
-            </h2>
-            <p className={inter.className}>
-              Discover and deploy boilerplate example Next.js&nbsp;projects.
-            </p>
-          </a>
-
-          <a
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=default-template&utm_campaign=create-next-app"
-            className={styles.card}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <h2 className={inter.className}>
-              Deploy <span>-&gt;</span>
-            </h2>
-            <p className={inter.className}>
-              Instantly deploy your Next.js site to a shareable URL
-              with&nbsp;Vercel.
-            </p>
-          </a>
-        </div>
-      </main>
-    </>
+      <Table
+        style={{ marginTop: 15 }}
+        rowKey='CN'
+        pagination={false}
+        columns={columns}
+        dataSource={dataSource}
+        scroll={{ x: '100vw', y: 500 }}
+        // rowSelection={rowSelection}
+      ></Table>
+    </main>
   )
 }

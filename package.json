@@ -12,11 +12,20 @@
     "@types/node": "18.15.11",
     "@types/react": "18.0.31",
     "@types/react-dom": "18.0.11",
+    "antd": "^5.3.3",
     "eslint": "8.37.0",
     "eslint-config-next": "13.2.4",
     "next": "13.2.4",
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "typescript": "5.0.2"
+    "react-window": "^1.8.8",
+    "typescript": "5.0.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/react-window": "^1.8.5",
+    "@types/tunnel": "^0.0.3",
+    "openai": "^3.2.1",
+    "tunnel": "^0.0.6"
   }
 }
